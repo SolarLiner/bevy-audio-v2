@@ -137,13 +137,12 @@ impl<F: 'static + Send + FnOnce(&mut World, &mut AudioGraph<(), 512>)> Command
     }
 }
 
-impl<F: 'static + Send + FnOnce(Option<EntityWorldMut>, &mut AudioGraph<(), 512>)> EntityCommand
+impl<F: 'static + Send + FnOnce(&mut World, Entity, &mut AudioGraph<(), 512>)> EntityCommand
     for UpdateAudioGraphCommand<F>
 {
     fn apply(self, id: Entity, world: &mut World) {
         apply_audio_graph_command(world, |world, audio_graph| {
-            let entity_world = world.get_entity_mut(id);
-            self.0(entity_world, audio_graph);
+            self.0(world, id, audio_graph);
         });
     }
 }
@@ -160,7 +159,7 @@ impl<'w, 's, F: 'static + Send + FnOnce(&mut World, &mut AudioGraph<(), 512>)>
     }
 }
 
-impl<'a, F: 'static + Send + FnOnce(Option<EntityWorldMut>, &mut AudioGraph<(), 512>)>
+impl<'a, F: 'static + Send + FnOnce(&mut World, Entity, &mut AudioGraph<(), 512>)>
     UpdateAudioGraphExt<F> for EntityCommands<'a>
 {
     fn update_audio_graph(&mut self, apply: F) {

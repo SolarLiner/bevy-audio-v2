@@ -1,7 +1,9 @@
 use atomic_float::AtomicF32;
+use bevy::prelude::Val::Px;
 use bevy::prelude::*;
-use bevy_audio_v2::{AudioPlugin, NodeId, UpdateAudioGraphExt};
-use firewheel::graph::AudioGraph;
+use bevy_audio_v2::{AudioPlugin, UpdateAudioGraphExt};
+use bevy_utils::EntityHashMap;
+use firewheel::graph::NodeID;
 use firewheel::node::{AudioNode, AudioNodeInfo, AudioNodeProcessor, ProcInfo};
 use firewheel::BlockFrames;
 use std::error::Error;
@@ -11,16 +13,21 @@ use std::sync::Arc;
 
 struct BeepPlugin;
 
+#[derive(Debug, Default, Resource)]
+struct Beeps {
+    entities: EntityHashMap<Entity, NodeID>,
+}
+
 impl Plugin for BeepPlugin {
     fn build(&self, app: &mut App) {
-        app.observe(on_add_beep).observe(on_remove_beep);
+        app.init_resource::<Beeps>().observe(on_add_beep).observe(on_remove_beep);
     }
 }
 
 fn on_add_beep(trigger: Trigger<OnAdd, Beep>, mut commands: Commands) {
     commands.entity(trigger.entity()).update_audio_graph(
-        |mut entity: EntityWorldMut, audio_graph: &mut AudioGraph<(), 512>| {
-            let beep = entity.get::<Beep>().unwrap();
+        |world, entity, audio_graph| {
+            let beep = world.entity(entity).get::<Beep>().unwrap();
             let node: Box<dyn AudioNode<_, 512>> = Box::new(BeepNode(Arc::new(BeepNodeImpl {
                 amplitude: AtomicF32::new(beep.amplitude),
                 frequency: AtomicF32::new(beep.frequency),
@@ -32,17 +39,16 @@ fn on_add_beep(trigger: Trigger<OnAdd, Beep>, mut commands: Commands) {
             audio_graph
                 .connect(node, 0, audio_graph.graph_out_node(), 1, false)
                 .unwrap();
-            entity.insert(NodeId(node));
+            world.resource_mut::<Beeps>().entities.insert(entity, node);
         },
     );
 }
 
 fn on_remove_beep(trigger: Trigger<OnRemove, Beep>, mut commands: Commands) {
     commands.entity(trigger.entity()).update_audio_graph(
-        |mut entity, audio_graph| {
-            let NodeId(node_id) = *entity.get::<NodeId>().unwrap();
-            audio_graph.remove_node(node_id).unwrap();
-            entity.remove::<Beep>();
+        |world, entity, audio_graph| {
+            let node = world.resource_mut::<Beeps>().entities.remove(&entity).unwrap();
+            audio_graph.remove_node(node).unwrap();
         },
     )
 }
@@ -73,8 +79,8 @@ impl<C, const MBF: usize> AudioNode<C, MBF> for BeepNode {
     fn activate(
         &mut self,
         sample_rate: u32,
-        num_inputs: usize,
-        num_outputs: usize,
+        _num_inputs: usize,
+        _num_outputs: usize,
     ) -> Result<Box<dyn AudioNodeProcessor<C, MBF>>, Box<dyn Error>> {
         Ok(Box::new(BeepNodeProcessor {
             params: self.clone(),
@@ -94,9 +100,9 @@ impl<C, const MBF: usize> AudioNodeProcessor<C, MBF> for BeepNodeProcessor {
     fn process(
         &mut self,
         frames: BlockFrames<MBF>,
-        inputs: &[&[f32; MBF]],
+        _inputs: &[&[f32; MBF]],
         outputs: &mut [&mut [f32; MBF]],
-        proc_info: ProcInfo<C>,
+        _proc_info: ProcInfo<C>,
     ) {
         let step = self.params.frequency.load(Ordering::Relaxed) * self.discretization_factor;
         let amplitude = self.params.amplitude.load(Ordering::Relaxed);
@@ -116,7 +122,9 @@ struct Beep {
 fn main() {
     App::new()
         .add_plugins((DefaultPlugins, AudioPlugin, BeepPlugin))
+        .add_systems(Startup, setup_ui)
         .add_systems(Update, toggle_beep)
+        .add_systems(PostUpdate, handle_ui_changes.run_if(|q: Query<(), Changed<Beep>>| !q.is_empty()))
         .run();
 }
 
@@ -126,7 +134,7 @@ fn toggle_beep(
     keyboard: Res<ButtonInput<KeyCode>>,
 ) {
     if keyboard.just_pressed(KeyCode::Space) {
-        if let Some(entity) = *current_entity {
+        if let Some(entity) = current_entity.take() {
             commands.entity(entity).despawn();
         } else {
             let entity = commands
@@ -137,5 +145,41 @@ fn toggle_beep(
                 .id();
             current_entity.replace(entity);
         }
+    }
+}
+
+#[derive(Component)]
+struct ActiveEntityMarker;
+
+const COLOR_NO: Color = Color::srgb(0.5, 0.2, 0.1);
+const COLOR_YES: Color = Color::srgb(0.2, 0.3, 0.5);
+
+fn setup_ui(mut commands: Commands) {
+    commands.spawn(Camera2dBundle::default());
+    commands.spawn(NodeBundle {
+        style: Style {
+            position_type: PositionType::Absolute,
+            top: Px(5.),
+            left: Px(5.),
+            display: Display::Flex,
+            align_items: AlignItems::Start,
+            ..default()
+        },
+        ..default()
+    })
+        .with_children(|parent| {
+            parent.spawn(TextBundle::from_section("Entity is active: ", TextStyle { font_size: 24., ..default() }));
+            parent.spawn((TextBundle::from_section("No", TextStyle { font_size: 24., color: COLOR_NO, ..default() }), ActiveEntityMarker));
+        });
+}
+
+fn handle_ui_changes(q: Query<Entity, With<Beep>>, mut q_ui: Query<&mut Text, With<ActiveEntityMarker>>) {
+    let mut text = q_ui.single_mut();
+    if q.is_empty() {
+        text.sections[0].value = String::from("No");
+        text.sections[0].style.color = COLOR_NO;
+    } else {
+        text.sections[0].value = String::from("Yes");
+        text.sections[0].style.color = COLOR_YES;
     }
 }
