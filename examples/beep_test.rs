@@ -22,7 +22,6 @@ use std::error::Error;
 use std::f32::consts::TAU;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use bevy::log;
 
 #[derive(Debug)]
 struct BeepNodeImpl {
