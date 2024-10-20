@@ -4,34 +4,31 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::system::{EntityCommand, EntityCommands};
 use bevy_ecs::world::Command;
 use bevy_log as log;
-use firewheel::graph::{AudioGraph, NodeID};
-use firewheel::{ActiveCtx, InactiveCtx, UpdateStatus};
+use firewheel::graph::{AudioGraph as FirewheelGraph, NodeID};
+use firewheel::{ActiveCtx, ActiveFwCpalCtx, InactiveCtx, InactiveFwCpalCtx, UpdateStatus};
 use std::ops;
 
-#[derive(Debug)]
-pub struct AudioEngineBuilder(InactiveCtx);
+pub mod node;
+
+const DEFAULT_MAX_BLOCK_FRAMES: usize = 512;
+
+#[derive(Deref, DerefMut)]
+pub struct AudioEngineBuilder(InactiveFwCpalCtx<BevyContext, DEFAULT_MAX_BLOCK_FRAMES>);
 
 impl Default for AudioEngineBuilder {
     fn default() -> Self {
-        Self(InactiveCtx::new(Default::default()))
+        Self(InactiveFwCpalCtx::new(Default::default()))
     }
 }
 
-pub struct AudioEngine(ActiveCtx);
+#[derive(Deref, DerefMut)]
+pub struct AudioEngine(ActiveFwCpalCtx<BevyContext, DEFAULT_MAX_BLOCK_FRAMES>);
 
-impl ops::Deref for AudioEngine {
-    type Target = ActiveCtx;
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct BevyContext;
 
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl ops::DerefMut for AudioEngine {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
+pub type AudioGraph = FirewheelGraph<BevyContext, 512>;
 
 #[derive(Debug, Clone, Resource)]
 pub struct InputDevice(pub String);
@@ -61,7 +58,7 @@ impl Plugin for AudioPlugin {
         // let input_device = app.world().get_resource::<InputDevice>().map(|s| &s.0);
         let output_device = app.world().get_resource::<OutputDevice>().map(|s| &s.0);
         let cx = cx
-            .activate(output_device, true, ())
+            .activate(output_device, true, BevyContext)
             .expect("Cannot start audio engine");
         app.insert_non_send_resource(AudioEngine(cx));
     }
@@ -74,9 +71,9 @@ fn update_output_device(world: &mut World) {
     let OutputDevice(out_device) = world.resource();
     log::info!("Changing output device to {out_device:?}");
 
-    let (cx, _) = cx.deactivate();
+    let (cx, context) = cx.deactivate();
     let cx = cx
-        .activate(Some(out_device), true, ())
+        .activate(Some(out_device), true, context.unwrap())
         .expect("Couldn't restart audio engine");
     world.insert_non_send_resource(AudioEngine(cx));
 }
@@ -110,26 +107,28 @@ fn update_audio_engine(world: &mut World) {
 
 fn apply_audio_graph_command(
     world: &mut World,
-    apply: impl FnOnce(&mut World, &mut AudioGraph<(), 512>),
+    apply: impl FnOnce(&mut World, &mut AudioGraph),
 ) {
     let AudioEngine(cx) = world
         .remove_non_send_resource::<AudioEngine>()
         .expect("Audio engine incorrectly set up");
     let out_device = cx.out_device_name().to_string();
-    let (mut cx, _) = cx.deactivate();
+    let (mut cx, Some(context)) = cx.deactivate() else {
+        panic!("Timed out while deactivating audio engine");
+    };
     let audio_graph = cx.graph_mut();
 
     apply(world, audio_graph);
 
     world.insert_non_send_resource(AudioEngine(
-        cx.activate(Some(&out_device), true, ())
+        cx.activate(Some(&out_device), true, context)
             .expect("Cannot restart audio engine"),
     ));
 }
 
 pub struct UpdateAudioGraphCommand<F>(F);
 
-impl<F: 'static + Send + FnOnce(&mut World, &mut AudioGraph<(), 512>)> Command
+impl<F: 'static + Send + FnOnce(&mut World, &mut AudioGraph)> Command
     for UpdateAudioGraphCommand<F>
 {
     fn apply(self, world: &mut World) {
@@ -137,7 +136,7 @@ impl<F: 'static + Send + FnOnce(&mut World, &mut AudioGraph<(), 512>)> Command
     }
 }
 
-impl<F: 'static + Send + FnOnce(&mut World, Entity, &mut AudioGraph<(), 512>)> EntityCommand
+impl<F: 'static + Send + FnOnce(&mut World, Entity, &mut AudioGraph)> EntityCommand
     for UpdateAudioGraphCommand<F>
 {
     fn apply(self, id: Entity, world: &mut World) {
@@ -151,7 +150,7 @@ pub trait UpdateAudioGraphExt<F> {
     fn update_audio_graph(&mut self, apply: F);
 }
 
-impl<'w, 's, F: 'static + Send + FnOnce(&mut World, &mut AudioGraph<(), 512>)>
+impl<'w, 's, F: 'static + Send + FnOnce(&mut World, &mut AudioGraph)>
     UpdateAudioGraphExt<F> for Commands<'w, 's>
 {
     fn update_audio_graph(&mut self, apply: F) {
@@ -159,7 +158,7 @@ impl<'w, 's, F: 'static + Send + FnOnce(&mut World, &mut AudioGraph<(), 512>)>
     }
 }
 
-impl<'a, F: 'static + Send + FnOnce(&mut World, Entity, &mut AudioGraph<(), 512>)>
+impl<'a, F: 'static + Send + FnOnce(&mut World, Entity, &mut AudioGraph)>
     UpdateAudioGraphExt<F> for EntityCommands<'a>
 {
     fn update_audio_graph(&mut self, apply: F) {

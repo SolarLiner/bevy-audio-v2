@@ -1,8 +1,20 @@
+//! Demonstrates how to create a simple audio node, in this case generating a sine wave at a specific
+//! frequency and amplitude.
+//!
+//! At a low level, there are 3 different types to manage:
+//! - The bevy component: this is the source of truth. Ideally, all changes made to this component should
+//!   be reflected in the audio node processor so that the sounds are also changed acordingly.
+//! - The audio node: This type is responsible for creating the audio node processor from the component.
+//! - The audio node processor: This type does the audio processing. It is running entirely separate from
+//!   Bevy, so any changes need to be synchronized.
+//!
+//! In this example, we use shared atomics as a means of communicating the parameters between Bevy and the audio engine.
+//! There are different solutions available, this is the simplest one to set up.
 use atomic_float::AtomicF32;
 use bevy::prelude::Val::Px;
 use bevy::prelude::*;
-use bevy_audio_v2::{AudioPlugin, UpdateAudioGraphExt};
-use bevy_utils::EntityHashMap;
+use bevy_audio_v2::node::{NodeComponent, NodePlugin, OnChange};
+use bevy_audio_v2::{AudioGraph, AudioPlugin};
 use firewheel::graph::NodeID;
 use firewheel::node::{AudioNode, AudioNodeInfo, AudioNodeProcessor, ProcInfo};
 use firewheel::BlockFrames;
@@ -12,61 +24,14 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use bevy::log;
 
-struct BeepPlugin;
-
-#[derive(Debug, Default, Resource)]
-struct Beeps {
-    entities: EntityHashMap<Entity, NodeID>,
-}
-
-impl Plugin for BeepPlugin {
-    fn build(&self, app: &mut App) {
-        app.init_resource::<Beeps>()
-            .observe(on_add_beep)
-            .observe(on_remove_beep);
-    }
-}
-
-fn on_add_beep(trigger: Trigger<OnAdd, Beep>, mut commands: Commands) {
-    commands
-        .entity(trigger.entity())
-        .update_audio_graph(|world, entity, audio_graph| {
-            let beep = world.entity(entity).get::<Beep>().unwrap();
-            let node: Box<dyn AudioNode<_, 512>> = Box::new(BeepNode(Arc::new(BeepNodeImpl {
-                amplitude: AtomicF32::new(beep.amplitude),
-                frequency: AtomicF32::new(beep.frequency),
-            })));
-            let node = audio_graph.add_node(0, 1, node);
-            audio_graph
-                .connect(node, 0, audio_graph.graph_out_node(), 0, false)
-                .unwrap();
-            audio_graph
-                .connect(node, 0, audio_graph.graph_out_node(), 1, false)
-                .unwrap();
-            world.resource_mut::<Beeps>().entities.insert(entity, node);
-        });
-}
-
-fn on_remove_beep(trigger: Trigger<OnRemove, Beep>, mut commands: Commands) {
-    commands
-        .entity(trigger.entity())
-        .update_audio_graph(|world, entity, audio_graph| {
-            let node = world
-                .resource_mut::<Beeps>()
-                .entities
-                .remove(&entity)
-                .unwrap();
-            audio_graph.remove_node(node).unwrap();
-        })
-}
-
 #[derive(Debug)]
 struct BeepNodeImpl {
     amplitude: AtomicF32,
     frequency: AtomicF32,
 }
 
-#[derive(Debug, Clone, Deref)]
+/// Audio node type.
+#[derive(Debug, Clone, Deref, Component)]
 struct BeepNode(Arc<BeepNodeImpl>);
 
 impl<C, const MBF: usize> AudioNode<C, MBF> for BeepNode {
@@ -126,33 +91,56 @@ struct Beep {
     frequency: f32,
 }
 
+impl NodeComponent for Beep {
+    fn create_node(mut entity: EntityWorldMut, audio_graph: &mut AudioGraph) -> NodeID {
+        let this = entity.get::<Beep>().unwrap();
+        let node = BeepNode(Arc::new(BeepNodeImpl {
+            amplitude: AtomicF32::new(this.amplitude),
+            frequency: AtomicF32::new(this.frequency),
+        }));
+        entity.insert(node.clone());
+        let node: Box<dyn AudioNode<_, 512>> = Box::new(node.clone());
+        let node = audio_graph.add_node(0, 1, node);
+        audio_graph
+            .connect(node, 0, audio_graph.graph_out_node(), 0, false)
+            .unwrap();
+        audio_graph
+            .connect(node, 0, audio_graph.graph_out_node(), 1, false)
+            .unwrap();
+
+        entity.observe(on_change_beep);
+        node
+    }
+}
+
+fn on_change_beep(trigger: Trigger<OnChange, Beep>, q: Query<(&Beep, &BeepNode)>) {
+    let (beep, node) = q.get(trigger.entity()).unwrap();
+    node.amplitude.store(beep.amplitude, Ordering::Relaxed);
+    node.frequency.store(beep.frequency, Ordering::Relaxed);
+}
+
 fn main() {
     App::new()
-        .add_plugins((DefaultPlugins, AudioPlugin, BeepPlugin))
-        .add_systems(Startup, setup_ui)
+        .add_plugins((DefaultPlugins, AudioPlugin, NodePlugin::<Beep>::default()))
+        .add_systems(Startup, (setup_beep, setup_ui))
         .add_systems(Update, toggle_beep)
         .observe(ui_handle_added)
         .observe(ui_handle_despawned)
+        .observe(on_change_beep)
         .run();
 }
 
+fn setup_beep(mut commands: Commands) {
+    commands.spawn((Beep { amplitude: 0., frequency: 440. }, ActiveEntityMarker));
+}
+
 fn toggle_beep(
-    mut current_entity: Local<Option<Entity>>,
-    mut commands: Commands,
+    mut q: Query<&mut Beep, With<ActiveEntityMarker>>,
     keyboard: Res<ButtonInput<KeyCode>>,
 ) {
     if keyboard.just_pressed(KeyCode::Space) {
-        if let Some(entity) = current_entity.take() {
-            commands.entity(entity).despawn();
-        } else {
-            let entity = commands
-                .spawn(Beep {
-                    frequency: 440.,
-                    amplitude: 0.125,
-                })
-                .id();
-            current_entity.replace(entity);
-        }
+        let mut beep = q.single_mut();
+        beep.amplitude = if beep.amplitude > f32::EPSILON { 0. } else { 1. };
     }
 }
 
@@ -198,28 +186,10 @@ fn setup_ui(mut commands: Commands) {
         });
 }
 
-fn ui_handle_added(
-    trigger: Trigger<OnAdd, Beep>,
-    mut commands: Commands,
-    mut q_ui: Query<&mut Text, With<ActiveEntityMarker>>,
-) {
+fn handle_ui_changes(q: Query<&Beep, With<ActiveEntityMarker>>, mut q_ui: Query<&mut Text, With<ActiveEntityMarker>>) {
     let mut text = q_ui.single_mut();
-    text.sections[0].value = String::from("Yes");
-    text.sections[0].style.color = COLOR_YES;
-    commands
-        .entity(trigger.entity());
-}
-
-fn ui_handle_despawned(
-    _: Trigger<OnRemove, Beep>,
-    mut q_ui: Query<&mut Text, With<ActiveEntityMarker>>,
-    q: Query<(), With<Beep>>,
-) {
-    let mut text = q_ui.single_mut();
-    let count = q.into_iter().count();
-    log::info!("[on despawned] query count: {count}");
-
-    if count > 1 { // Entity not despawned/component not removed yet
+    let beep = q.single();
+    if beep.amplitude > f32::EPSILON {
         text.sections[0].value = String::from("Yes");
         text.sections[0].style.color = COLOR_YES;
     } else {
