@@ -1,13 +1,10 @@
 use crate::{AudioGraph, UpdateAudioGraphExt};
-use bevy_app::{App, Plugin, PostUpdate};
+use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::*;
 use bevy_ecs::world::EntityWorldMut;
 use bevy_utils::EntityHashMap;
 use firewheel::graph::NodeID;
 use std::marker::PhantomData;
-
-#[derive(Event)]
-pub struct OnChange;
 
 #[allow(unused_variables)]
 pub trait NodeComponent: Component {
@@ -42,7 +39,7 @@ impl<N: NodeComponent> Default for NodeIds<N> {
 
 impl<N: NodeComponent + 'static> Plugin for NodePlugin<N> {
     fn build(&self, app: &mut App) {
-        app.init_resource::<NodeIds<N>>().observe(on_add_node::<N>).observe(on_remove_node::<N>).add_systems(PostUpdate, detect_changes::<N>);
+        app.init_resource::<NodeIds<N>>().observe(on_add_node::<N>).observe(on_remove_node::<N>);
     }
 }
 
@@ -62,24 +59,16 @@ fn on_remove_node<N: NodeComponent>(trigger: Trigger<OnRemove, N>, mut commands:
     });
 }
 
-fn detect_changes<N: NodeComponent>(mut commands: Commands, q: Query<Entity, Changed<N>>) {
-    for entity in &q {
-        commands.trigger_targets(OnChange, entity);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AudioGraph;
+    use crate::{AudioGraph, AudioPlugin};
     use bevy_app::App;
-    use bevy_ecs::world::CommandQueue;
     use firewheel::node::AudioNode;
 
-    #[derive(Component)]
+    #[derive(Default, Component)]
     struct TestNodeComponent {
         created: bool,
-        removed: bool,
     }
 
     impl NodeComponent for TestNodeComponent {
@@ -90,61 +79,36 @@ mod tests {
         }
     }
 
+    fn app() -> (App, Entity) {
+        let mut app = App::default();
+        app.add_plugins((AudioPlugin, NodePlugin::<TestNodeComponent>::default()));
+        app.finish();
+        app.cleanup();
+        let entity = app.world_mut().spawn(TestNodeComponent::default()).id();
+        (app, entity)
+    }
+
     #[test]
     fn test_on_add_node() {
-        let mut app = App::default();
-        app.world.spawn().insert(TestNodeComponent);
-        app.init_resource::<NodeIds<TestNodeComponent>>();
+        let (mut app, entity) = app();
 
-        let mut command_queue = CommandQueue::default();
-        let mut commands = Commands::new(&mut command_queue, &app.world);
+        app.update();
 
-        let entity = app.world.spawn().insert(TestNodeComponent).id();
-        on_add_node(Trigger::new(entity), commands);
-
-        command_queue.apply(&mut app.world);
-
-        let node_ids = app.world.get_resource::<NodeIds<TestNodeComponent>>().unwrap();
+        let node_ids = app.world().get_resource::<NodeIds<TestNodeComponent>>().unwrap();
+        let comp = app.world().entity(entity).get::<TestNodeComponent>().unwrap();
+        assert!(comp.created);
         assert!(node_ids.data.contains_key(&entity));
     }
 
     #[test]
     fn test_on_remove_node() {
-        let mut app = App::default();
-        app.world.spawn().insert(TestNodeComponent);
-        app.init_resource::<NodeIds<TestNodeComponent>>();
+        let (mut app, entity) = app();
+        app.update();
 
-        let entity = app.world.spawn().insert(TestNodeComponent).id();
+        app.world_mut().entity_mut(entity).remove::<TestNodeComponent>();
+        app.update();
 
-        let mut command_queue = CommandQueue::default();
-        let mut commands = Commands::new(&mut command_queue, &app.world);
-        on_add_node(Trigger::new(entity), commands.clone());
-        command_queue.apply(&mut app.world);
-
-        on_remove_node(Trigger::new(entity), commands);
-        command_queue.apply(&mut app.world);
-
-        let node_ids = app.world.get_resource::<NodeIds<TestNodeComponent>>().unwrap();
+        let node_ids = app.world().get_resource::<NodeIds<TestNodeComponent>>().unwrap();
         assert!(!node_ids.data.contains_key(&entity));
-    }
-
-    #[test]
-    fn test_detect_changes() {
-        let mut app = App::default();
-        app.world.spawn().insert(TestNodeComponent);
-        app.init_resource::<NodeIds<TestNodeComponent>>();
-
-        let entity = app.world.spawn().insert(TestNodeComponent).id();
-
-        let mut command_queue = CommandQueue::default();
-        let mut commands = Commands::new(&mut command_queue, &app.world);
-        app.world.set_changed::<TestNodeComponent>(entity);
-
-        detect_changes(commands, app.world.query::<Entity, Changed<TestNodeComponent>>());
-        command_queue.apply(&mut app.world);
-
-        // Here, you can add assertions to verify the behavior of `detect_changes`, 
-        // such as whether the `OnChange` event was triggered.
-        // Assert based on your actual application event testing mechanism.
     }
 }

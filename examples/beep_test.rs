@@ -13,7 +13,7 @@
 use atomic_float::AtomicF32;
 use bevy::prelude::Val::Px;
 use bevy::prelude::*;
-use bevy_audio_v2::node::{NodeComponent, NodePlugin, OnChange};
+use bevy_audio_v2::node::{NodeComponent, NodePlugin};
 use bevy_audio_v2::{AudioGraph, AudioPlugin};
 use firewheel::graph::NodeID;
 use firewheel::node::{AudioNode, AudioNodeInfo, AudioNodeProcessor, ProcInfo};
@@ -107,16 +107,16 @@ impl NodeComponent for Beep {
         audio_graph
             .connect(node, 0, audio_graph.graph_out_node(), 1, false)
             .unwrap();
-
-        entity.observe(on_change_beep);
         node
     }
 }
 
-fn on_change_beep(trigger: Trigger<OnChange, Beep>, q: Query<(&Beep, &BeepNode)>) {
-    let (beep, node) = q.get(trigger.entity()).unwrap();
-    node.amplitude.store(beep.amplitude, Ordering::Relaxed);
-    node.frequency.store(beep.frequency, Ordering::Relaxed);
+fn on_change_beep(q: Query<(&Beep, &BeepNode), Changed<Beep>>) {
+    for (beep, node) in &q {
+        info!("Beep changed: amplitude = {}, frequency = {}", beep.amplitude, beep.frequency);
+        node.amplitude.store(beep.amplitude, Ordering::Relaxed);
+        node.frequency.store(beep.frequency, Ordering::Relaxed);
+    }
 }
 
 fn main() {
@@ -124,9 +124,7 @@ fn main() {
         .add_plugins((DefaultPlugins, AudioPlugin, NodePlugin::<Beep>::default()))
         .add_systems(Startup, (setup_beep, setup_ui))
         .add_systems(Update, toggle_beep)
-        .observe(ui_handle_added)
-        .observe(ui_handle_despawned)
-        .observe(on_change_beep)
+        .add_systems(PostUpdate, (on_change_beep, handle_ui_changes.run_if(|q: Query<(), Changed<Beep>>| !q.is_empty())))
         .run();
 }
 
@@ -183,6 +181,7 @@ fn setup_ui(mut commands: Commands) {
                 ),
                 ActiveEntityMarker,
             ));
+            parent.spawn(TextBundle::from_section(" (Press Space to toggle)", TextStyle { font_size: 24., ..default() }));
         });
 }
 

@@ -4,9 +4,10 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::system::{EntityCommand, EntityCommands};
 use bevy_ecs::world::Command;
 use bevy_log as log;
+use bevy_log::prelude::*;
 use firewheel::graph::{AudioGraph as FirewheelGraph, NodeID};
-use firewheel::{ActiveCtx, ActiveFwCpalCtx, InactiveCtx, InactiveFwCpalCtx, UpdateStatus};
-use std::ops;
+use firewheel::{ActiveFwCpalCtx, InactiveFwCpalCtx, UpdateStatus};
+use log::error;
 
 pub mod node;
 
@@ -69,7 +70,7 @@ fn update_output_device(world: &mut World) {
         .remove_non_send_resource()
         .expect("Audio engine incorrectly set up");
     let OutputDevice(out_device) = world.resource();
-    log::info!("Changing output device to {out_device:?}");
+    info!("Changing output device to {out_device:?}");
 
     let (cx, context) = cx.deactivate();
     let cx = cx
@@ -80,12 +81,14 @@ fn update_output_device(world: &mut World) {
 
 // Exclusive system because the audio engine requires moving itself out and back in
 fn update_audio_engine(world: &mut World) {
-    let AudioEngine(cx) = world
-        .remove_non_send_resource()
-        .expect("Audio engine incorrectly set up");
+    let Some(AudioEngine(cx)) = world
+        .remove_non_send_resource() else {
+        error!("Error getting audio engine resource");
+        return;
+    };
     if !world.resource::<Events<AppExit>>().is_empty() {
         cx.deactivate();
-        log::info!("Shutting down audio engine");
+        info!("Shutting down audio engine");
         return;
     }
 
@@ -97,7 +100,7 @@ fn update_audio_engine(world: &mut World) {
             world.insert_non_send_resource(AudioEngine(cx));
         }
         UpdateStatus::Deactivated { error_msg, .. } => {
-            log::info!("Audio engine deactivated");
+            info!("Audio engine deactivated");
             if let Some(error) = error_msg {
                 log::error!("Audio engine error: {error}");
             }
@@ -109,27 +112,21 @@ fn apply_audio_graph_command(
     world: &mut World,
     apply: impl FnOnce(&mut World, &mut AudioGraph),
 ) {
-    let AudioEngine(cx) = world
+    let Some(mut cx) = world
         .remove_non_send_resource::<AudioEngine>()
-        .expect("Audio engine incorrectly set up");
-    let out_device = cx.out_device_name().to_string();
-    let (mut cx, Some(context)) = cx.deactivate() else {
-        panic!("Timed out while deactivating audio engine");
+    else {
+        error!("Audio Engine incorrectly set up");
+        return;
     };
     let audio_graph = cx.graph_mut();
-
     apply(world, audio_graph);
-
-    world.insert_non_send_resource(AudioEngine(
-        cx.activate(Some(&out_device), true, context)
-            .expect("Cannot restart audio engine"),
-    ));
+    world.insert_non_send_resource(cx);
 }
 
 pub struct UpdateAudioGraphCommand<F>(F);
 
 impl<F: 'static + Send + FnOnce(&mut World, &mut AudioGraph)> Command
-    for UpdateAudioGraphCommand<F>
+for UpdateAudioGraphCommand<F>
 {
     fn apply(self, world: &mut World) {
         apply_audio_graph_command(world, self.0);
@@ -137,7 +134,7 @@ impl<F: 'static + Send + FnOnce(&mut World, &mut AudioGraph)> Command
 }
 
 impl<F: 'static + Send + FnOnce(&mut World, Entity, &mut AudioGraph)> EntityCommand
-    for UpdateAudioGraphCommand<F>
+for UpdateAudioGraphCommand<F>
 {
     fn apply(self, id: Entity, world: &mut World) {
         apply_audio_graph_command(world, |world, audio_graph| {
@@ -151,7 +148,7 @@ pub trait UpdateAudioGraphExt<F> {
 }
 
 impl<'w, 's, F: 'static + Send + FnOnce(&mut World, &mut AudioGraph)>
-    UpdateAudioGraphExt<F> for Commands<'w, 's>
+UpdateAudioGraphExt<F> for Commands<'w, 's>
 {
     fn update_audio_graph(&mut self, apply: F) {
         self.add(UpdateAudioGraphCommand(apply));
@@ -159,7 +156,7 @@ impl<'w, 's, F: 'static + Send + FnOnce(&mut World, &mut AudioGraph)>
 }
 
 impl<'a, F: 'static + Send + FnOnce(&mut World, Entity, &mut AudioGraph)>
-    UpdateAudioGraphExt<F> for EntityCommands<'a>
+UpdateAudioGraphExt<F> for EntityCommands<'a>
 {
     fn update_audio_graph(&mut self, apply: F) {
         self.add(UpdateAudioGraphCommand(apply));
